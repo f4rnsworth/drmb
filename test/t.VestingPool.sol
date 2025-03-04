@@ -40,7 +40,7 @@ contract VestingPoolTest is Test {
         vestingPool.deposit(DEPOSIT_AMOUNT);
         vm.stopPrank();
 
-        assertEq(vestingPool.userBalances(user1), DEPOSIT_AMOUNT);
+        assertEq(vestingPool.totalDeposited(user1), DEPOSIT_AMOUNT);
     }
 
     function testTransferToOwner() public {
