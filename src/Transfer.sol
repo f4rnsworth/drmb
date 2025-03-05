@@ -9,7 +9,7 @@ contract VestingPool is Ownable {
 
     uint256 public roundStartDate;
     uint256 public dispersalDate;
-    uint256 public constant APY = 6; // 8% Fixed APY
+    uint256 public constant APY = 6; // 6% Fixed APY
     uint256 public constant ONE_YEAR = 365 days;
 
     struct UserDeposit {
@@ -44,6 +44,7 @@ contract VestingPool is Ownable {
         _;
     }
 
+    // set msg.sender to owner
     constructor(
         address _usdcToken,
         uint256 _roundStartDate
@@ -51,6 +52,21 @@ contract VestingPool is Ownable {
         usdcToken = IERC20(_usdcToken);
         roundStartDate = _roundStartDate;
         dispersalDate = _roundStartDate + ONE_YEAR;
+    }
+
+    // set the roundStartDate, allowing for follow on rounds
+    // should not allow modification of an active round
+    function setRoundStartDate(uint256 _newStartDate) external onlyOwner {
+        // check roundStartDate is greater than current date
+        require(block.timestamp < roundStartDate, "Cannot modify active round");
+        // check _newStartDate is not in the past
+        require(
+            _newStartDate > block.timestamp,
+            "start date must be in the future"
+        );
+
+        // set new roundStartDate
+        roundStartDate = _newStartDate;
     }
 
     // 2500 cap on total amount depositable
@@ -61,10 +77,15 @@ contract VestingPool is Ownable {
             "Membership expired"
         );
         require(_amount > 0, "Deposit must be greater than zero");
-        require(memberDeposits[msg.sender].amount <= 2500, "Already deposited");
+        require(
+            memberDeposits[msg.sender].amount <= 2500,
+            "Max balance 2500 usdc"
+        );
 
+        // transfer from user to contract
         usdcToken.transferFrom(msg.sender, address(this), _amount);
 
+        //record wallet, deposit amount and withdrawl = false
         memberDeposits[msg.sender] = UserDeposit(_amount, false);
         members.push(msg.sender);
         totalDeposited += _amount;
@@ -72,6 +93,7 @@ contract VestingPool is Ownable {
         emit Deposited(msg.sender, _amount);
     }
 
+    // ensure membership is expired
     function payMembership() external {
         require(
             membershipExpiry[msg.sender] < block.timestamp,
@@ -88,38 +110,48 @@ contract VestingPool is Ownable {
         membershipExpiry[msg.sender] = block.timestamp + ONE_YEAR;
     }
 
-    // should move the funds to the owners wallet after start date event
+    // move the funds to the owners wallet after start date event
     function transferToOwner() external onlyAfterStart onlyOwner {
+        // ensure funds present
         require(totalDeposited > 0, "No funds to transfer");
 
+        //transfer balance to owner
         uint256 balance = usdcToken.balanceOf(address(this));
         usdcToken.transfer(owner(), balance);
 
         emit FundsTransferredToOwner(balance);
     }
 
+    // allows owner to deposit funds 7 days before dispersalDate
     function depositForDispersal(uint256 _amount) external onlyOwner {
         require(
             block.timestamp >= dispersalDate - 7 days,
             "Cannot fund too early"
         );
+
+        // transfer usdc from owner to contract
         usdcToken.transferFrom(msg.sender, address(this), _amount);
     }
 
+    // allows member to withdraw funds after dispersalDate
     function withdraw() external onlyAfterDispersal {
         // also check thier membership before allowing withdrawls
         require(
             membershipExpiry[msg.sender] >= block.timestamp,
             "Membership expired"
         );
+
+        // cheacks userDeposit to ensure wallet is owed funds and has not been withdrawn already
         UserDeposit storage userDeposit = memberDeposits[msg.sender];
         require(userDeposit.amount > 0, "No deposit found");
         require(!userDeposit.withdrawn, "Already withdrawn");
 
+        // calculates interest accrued and totalReturn amount
         uint256 interest = (userDeposit.amount * APY * ONE_YEAR) /
             (100 * ONE_YEAR);
         uint256 totalReturn = userDeposit.amount + interest;
 
+        // set userDeposit withdrawn bool to true and transfers funds from contract to member
         userDeposit.withdrawn = true;
         usdcToken.transfer(msg.sender, totalReturn);
 
