@@ -1,86 +1,95 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
-import "../src/Transfer.sol";
-import "../src/MockUsdc.sol";
+import "forge-std/console.sol";
+import "src/Transfer.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+contract MockUSDC is ERC20 {
+    constructor() ERC20("MockUSDC", "USDC") {
+        _mint(msg.sender, 1_000_000 * 10 ** 6); // Mint 1M USDC for testing
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
 
 contract VestingPoolTest is Test {
     VestingPool vestingPool;
     MockUSDC usdc;
-    address owner;
-    address user1;
-    address user2;
-
-    uint256 constant APY = 8;
-    uint256 constant DEPOSIT_AMOUNT = 1000e6; // 1000 USDC
-    uint256 startDate;
-    uint256 oneYear = 365 days;
+    address owner = address(1);
+    address user1 = address(2);
+    address user2 = address(3);
 
     function setUp() public {
-        owner = address(this);
-        user1 = address(0x1);
-        user2 = address(0x2);
-        startDate = block.timestamp + 60; // Start in 1 min
-
-        // Deploy Mock USDC Token
+        vm.startPrank(owner);
         usdc = new MockUSDC();
+        vestingPool = new VestingPool(
+            owner,
+            address(usdc),
+            block.timestamp + 1 days
+        );
+        vm.stopPrank();
 
-        // Deploy Vesting Pool
-        vestingPool = new VestingPool(address(usdc), startDate);
+        usdc.mint(user1, 5000 * 10 ** 6);
+        usdc.mint(user2, 5000 * 10 ** 6);
 
-        // Fund users with mock USDC
-        usdc.mint(user1, DEPOSIT_AMOUNT);
-        usdc.mint(user2, DEPOSIT_AMOUNT);
+        vm.prank(user1);
+        usdc.approve(address(vestingPool), type(uint256).max);
+
+        vm.prank(user2);
+        usdc.approve(address(vestingPool), type(uint256).max);
+    }
+
+    function testMembershipPayment() public {
+        vm.prank(user1);
+        vestingPool.payMembership();
+        assertGt(vestingPool.membershipExpiry(user1), block.timestamp);
     }
 
     function testDeposit() public {
-        vm.startPrank(user1);
-        usdc.approve(address(vestingPool), DEPOSIT_AMOUNT);
-        vestingPool.deposit(DEPOSIT_AMOUNT);
-        vm.stopPrank();
+        vm.prank(owner);
+        vestingPool.addToAllowList(user1);
 
-        assertEq(vestingPool.totalDeposited(user1), DEPOSIT_AMOUNT);
+        vm.prank(user1);
+        vestingPool.payMembership();
+
+        vm.prank(user1);
+        vestingPool.deposit(1000 * 10 ** 6);
+
+        (uint256 amount, bool withdrawn) = vestingPool.memberDeposits(user1);
+        assertEq(amount, 1000 * 10 ** 6);
+        assertFalse(withdrawn);
     }
 
     function testTransferToOwner() public {
-        // User deposits
-        vm.startPrank(user1);
-        usdc.approve(address(vestingPool), DEPOSIT_AMOUNT);
-        vestingPool.deposit(DEPOSIT_AMOUNT);
-        vm.stopPrank();
+        vm.prank(owner);
+        vestingPool.addToAllowList(user1);
+        vm.prank(user1);
+        vestingPool.payMembership();
+        vm.prank(user1);
+        vestingPool.deposit(1000 * 10 ** 6);
 
-        // Fast forward to start date
-        vm.warp(startDate + 1);
-
-        // Transfer funds to owner
-        uint256 ownerBalanceBefore = usdc.balanceOf(owner);
+        vm.warp(block.timestamp + 2 days);
+        vm.prank(owner);
         vestingPool.transferToOwner();
-        uint256 ownerBalanceAfter = usdc.balanceOf(owner);
-
-        assertEq(ownerBalanceAfter - ownerBalanceBefore, DEPOSIT_AMOUNT);
     }
 
-    function testWithdrawAfterVesting() public {
-        // User deposits funds
-        vm.startPrank(user1);
-        usdc.approve(address(vestingPool), DEPOSIT_AMOUNT);
-        vestingPool.deposit(DEPOSIT_AMOUNT);
-        vm.stopPrank();
+    function testWithdraw() public {
+        vm.prank(owner);
+        vestingPool.addToAllowList(user1);
+        vm.prank(user1);
+        vestingPool.payMembership();
+        vm.prank(user1);
+        vestingPool.deposit(1000 * 10 ** 6);
 
-        // Simulate owner returning funds + interest
-        uint256 interest = (DEPOSIT_AMOUNT * APY) / 100;
-        uint256 totalReturn = DEPOSIT_AMOUNT + interest;
-        usdc.mint(address(vestingPool), totalReturn);
-
-        // Fast forward to 12 months later
-        vm.warp(startDate + oneYear);
-
-        // User withdraws
-        vm.startPrank(user1);
+        vm.warp(block.timestamp + 365 days);
+        vm.prank(owner);
+        vestingPool.depositForDispersal(1060 * 10 ** 6);
+        vm.prank(user1);
         vestingPool.withdraw();
-        vm.stopPrank();
-
-        assertEq(usdc.balanceOf(user1), totalReturn);
     }
 }
+

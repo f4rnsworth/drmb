@@ -3,14 +3,16 @@ pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-contract VestingPool is Ownable {
+contract VestingPool is Ownable, ReentrancyGuard {
     IERC20 public usdcToken;
 
     uint256 public roundStartDate;
     uint256 public dispersalDate;
     uint256 public constant APY = 6; // 6% Fixed APY
     uint256 public constant ONE_YEAR = 365 days;
+    uint256 public dispersalFunds;
 
     struct UserDeposit {
         uint256 amount;
@@ -25,9 +27,12 @@ contract VestingPool is Ownable {
     mapping(address => uint256) public membershipExpiry;
     uint256 public constant MEMBERSHIP_FEE = 25 * 10 ** 6; // 25 usdc
 
+    mapping(address => bool) public allowList;
+
     event Deposited(address indexed user, uint256 amount);
     event FundsTransferredToOwner(uint256 amount);
     event Withdrawn(address indexed user, uint256 amount);
+    event MembershipPaid(address indexed user, uint256 expiry);
 
     modifier onlyBeforeStart() {
         require(block.timestamp < roundStartDate, "Deposits closed");
@@ -44,11 +49,17 @@ contract VestingPool is Ownable {
         _;
     }
 
+    modifier onlyExistingMember() {
+        require(memberDeposits[msg.sender].amount > 0, "Not a member");
+        _;
+    }
+
     // set msg.sender to owner
     constructor(
+        address initialOwner,
         address _usdcToken,
         uint256 _roundStartDate
-    ) Ownable(msg.sender) {
+    ) Ownable(initialOwner) {
         usdcToken = IERC20(_usdcToken);
         roundStartDate = _roundStartDate;
         dispersalDate = _roundStartDate + ONE_YEAR;
@@ -69,8 +80,22 @@ contract VestingPool is Ownable {
         roundStartDate = _newStartDate;
     }
 
+    function addToAllowList(address _user) external onlyOwner {
+        allowList[_user] = true;
+    }
+
+    function removeFromAllowList(address _user) external onlyOwner {
+        allowList[_user] = false;
+    }
+
+    function isAllowed(address _user) external view returns (bool) {
+        return allowList[_user];
+    }
+
     // 2500 cap on total amount depositable
     function deposit(uint256 _amount) external onlyBeforeStart {
+        // make sure address sending deposit is on the allow list
+        require(allowList[msg.sender], "Not invited to this round");
         // check for membership before staking
         require(
             membershipExpiry[msg.sender] >= block.timestamp,
@@ -78,7 +103,7 @@ contract VestingPool is Ownable {
         );
         require(_amount > 0, "Deposit must be greater than zero");
         require(
-            memberDeposits[msg.sender].amount <= 2500,
+            memberDeposits[msg.sender].amount + _amount <= 2500,
             "Max balance 2500 usdc"
         );
 
@@ -86,11 +111,17 @@ contract VestingPool is Ownable {
         usdcToken.transferFrom(msg.sender, address(this), _amount);
 
         //record wallet, deposit amount and withdrawl = false
-        memberDeposits[msg.sender] = UserDeposit(_amount, false);
-        members.push(msg.sender);
+        memberDeposits[msg.sender].amount += _amount;
+        if (memberDeposits[msg.sender].amount == 0) {
+            members.push(msg.sender);
+        }
         totalDeposited += _amount;
 
         emit Deposited(msg.sender, _amount);
+    }
+
+    function max(uint256 a, uint256 b) private pure returns (uint256) {
+        return a > b ? a : b;
     }
 
     // ensure membership is expired
@@ -107,7 +138,14 @@ contract VestingPool is Ownable {
         );
 
         // Extend Membership for one year
-        membershipExpiry[msg.sender] = block.timestamp + ONE_YEAR;
+        if (membershipExpiry[msg.sender] > block.timestamp) {
+            membershipExpiry[msg.sender] += ONE_YEAR;
+        } else {
+            membershipExpiry[msg.sender] =
+                max(membershipExpiry[msg.sender], block.timestamp) +
+                ONE_YEAR;
+        }
+        emit MembershipPaid(msg.sender, membershipExpiry[msg.sender]);
     }
 
     // move the funds to the owners wallet after start date event
@@ -131,13 +169,20 @@ contract VestingPool is Ownable {
 
         // transfer usdc from owner to contract
         usdcToken.transferFrom(msg.sender, address(this), _amount);
+        dispersalFunds += _amount;
     }
 
     // allows member to withdraw funds after dispersalDate
-    function withdraw() external onlyAfterDispersal {
+    function withdraw()
+        external
+        onlyAfterDispersal
+        nonReentrant
+        onlyExistingMember
+    {
         // also check thier membership before allowing withdrawls
         require(
-            membershipExpiry[msg.sender] >= block.timestamp,
+            membershipExpiry[msg.sender] >= dispersalDate ||
+                membershipExpiry[msg.sender] >= block.timestamp,
             "Membership expired"
         );
 
@@ -156,5 +201,9 @@ contract VestingPool is Ownable {
         usdcToken.transfer(msg.sender, totalReturn);
 
         emit Withdrawn(msg.sender, totalReturn);
+    }
+
+    function recoverFunds(address _token, uint256 _amount) external onlyOwner {
+        IERC20(_token).transfer(owner(), _amount);
     }
 }
